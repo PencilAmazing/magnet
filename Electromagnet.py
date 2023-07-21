@@ -25,6 +25,9 @@ class System:
         #return scipy.constants.epsilon_0
         #return 1
 
+    def permeability_at_point(self, x, y, z):
+        return scipy.constants.mu_0
+
     def add_entity(self, entity):
         assert isinstance(entity, Entity)
         self.entities.append(entity)
@@ -35,6 +38,13 @@ class System:
             E = np.nan_to_num(ent.field_at_point(x, y, z))
             E_total += E
         return E_total
+
+    def calculate_total_mag_field_at_point(self, x, y, z):
+        B_total = np.zeros_like([x,y,z], dtype=float)
+        for ent in self.entities:
+            B = np.nan_to_num(ent.magnetic_field_at_point(x, y, z))
+            B_total += B
+        return B_total
 
     def plot_entities(self, mpl_ax):
         for ent in self.entities:
@@ -49,6 +59,13 @@ class System:
                       np.arange(-1, 1, 0.4))
         E_field = self.calculate_total_field_at_point(X,Y,Z)
         mpl_ax.quiver(X,Y,Z, *E_field, normalize=True, length=0.2)
+
+    def plot_magnetic_field(self, mpl_ax):
+        X, Y, Z = np.meshgrid(np.arange(-1, 1, 0.4),
+                      np.arange(-1, 1, 0.4),
+                      np.arange(-1, 1, 0.4))
+        B_field = self.calculate_total_mag_field_at_point(X, Y, Z)
+        mpl_ax.quiver(X,Y,Z, *B_field, normalize=True, length=0.2, color='g')
 
 class Entity:
     def __init__(self, system, region):
@@ -96,24 +113,62 @@ class Point(Entity):
 
 class Line(Entity):
     # fx, fy, fz are all functions of t only
-    def __init__(self, system, fx, fy, fz, charge_density=1):
-        self.system = System
-        self.X = fx*C.i + fy*C.j + fz*C.j
+    def __init__(self, system, fx, fy, fz, charge_density=1, current=0, t_limits=(0,1)):
+        self.system = system
+        self.X = 1*fx*C.i + 1*fy*C.j + 1*fz*C.k
         self.charge_density=1
+        self.current = current
+        self.t_limits = t_limits
 
+    # Electric field at px, py, pz, takes np array
     def field_at_point(self, px, py, pz):
         i,j,k = symbols("i j k")
-        P = i*C.i + j*C.j + k*C.k
-        R = self.charge_density * (P-X)/((P-X).magnitude()**3)
-        R /= (4*sympy.pi*self.system.permittivity_at_point(i,j,k))
+        P = 1*i*C.i + 1*j*C.j + 1*k*C.k
+        R = self.charge_density * (P-self.X)/((P-self.X).magnitude()**3)
+        R /= (4*sympy.pi * self.system.permittivity_at_point(0,0,0))
 
         E = []
         for coeff in list(R.to_matrix(C)):
-            dE = ufuncify([i,j,k], coeff)
-            E_integral = lambda a,b,c: scipy.integrate.quad(dE, 0,1, args=(a,b,c,), epsrel=0.0001)[0]
+            dE = ufuncify([t, i,j,k], coeff)
+            min_t, max_t = self.t_limits
+            E_integral = lambda a,b,c: scipy.integrate.quad(dE, min_t,max_t, args=(a,b,c,), epsrel=0.0001)[0]
             E.append(np.array(np.vectorize(E_integral)(px, py, pz)))
         return E
-    
+
+    # Magnetic field at px, py, pz, also takes np arrays
+    def magnetic_field_at_point(self, px, py, pz):
+        i,j,k = symbols("i j k")
+        P = 1*i*C.i + 1*j*C.j + 1*k*C.k
+        # biot-savart law
+        R = self.current * self.system.permeability_at_point(px, py, pz)/(4*pi)
+        R *= self.X.cross(P)/((P-self.X).magnitude()**2)
+
+        B = []
+        for coeff in list(R.to_matrix(C)):
+            dB = ufuncify([t, i,j,k], coeff)
+            min_t, max_t = self.t_limits
+            B_integral = lambda a,b,c: scipy.integrate.quad(dB, min_t,max_t, args=(a,b,c,), epsrel=0.0001)[0]
+            B.append(np.array(np.vectorize(B_integral)(px, py, pz)))
+        return B
+
+    # Pass a matplotlib axis to plot self
+    def plot_surface(self, ax):
+        t = sympy.symbols('t')
+        line = sympy.lambdify([t], self.X.to_matrix(C))
+        min_t, max_t = self.t_limits
+        min_t = np.nan_to_num(float(min_t), posinf=10e5, neginf=-10e5)
+        max_t = np.nan_to_num(float(max_t), posinf=10e5, neginf=-10e5)
+
+        X = []
+        Y = []
+        Z = []
+        for dt in np.linspace(min_t, max_t, 20):
+            o = line(dt)
+            X.append(o[0])
+            Y.append(o[1])
+            Z.append(o[2])
+        ax.plot(X,Y,Z, color='orange')
+
 # Parametric coordiantes each are functions of surfaces of form (t, u)
 # charge_density must also be an sympy expression of (t, u)
 class Surface(Entity):
@@ -129,32 +184,16 @@ class Surface(Entity):
         P = i*C.i + j*C.j + k*C.k # point subbed in
         R = (P-self.X)/(P-self.X).magnitude()**3 # directional com
         R *= self.charge_density / (4*sympy.pi*system.permittivity_at_point(0,0,0))
-        #dE = sympy.Integral(self.charge_density * R *1/(4*sympy.pi*system.permittivity_at_point(0,0,0)),
-        #                    (t, 0, 1), (u, 0, 1))
         E = []
         for coeff in list(R.to_matrix(C)):
-            #dE = lambdify([u,t,i,j,k], sympy.Integral(coeff, t, u))
             dE = ufuncify([u,t,i,j,k], coeff)
-            #E.append(dE(1,1, px,py,pz) - dE(0,0, px,py,pz))
             E_coeff = lambda a,b,c: scipy.integrate.dblquad(dE, 0,1, 0,1, args=(a,b,c), epsabs=0.0001, epsrel=0.0001)[0]
             compute = np.array(np.vectorize(E_coeff)(px,py,pz))
-            #print(len(compute), "that is a tuple?")
             E.append(compute.transpose())
-            #E.append(scipy.integrate.dblquad(dE, 0,1, 0,1, args=(px,py,pz)))
         return E
-        #E = ufuncify([i,j,k, t, u], sympy.Integral(R, t, u).doit())
-        #return E(px, py, pz, 1, 1) - E(px, py, pz, 0, 0)
-
-        #E_field = []
-        # We calculate each component separately
-        # lambdify cannot handle vectors
-        # ufuncify is a bit more pleasant
-        #for coef in [C.i, C.j, C.k]:
-        #    E_field.append(scipy.integrate.dblquad(sympy.lambdify([t, u], dE.coeff(coef)), 0, 1, 0, 1)[0])
-        #return np.array(E_field)
 
     def plot_surface(self, ax):
-        surf = sympy.lambdify([t, u], self.X.to_matrix(C), modules=["numpy"])
+        surf = sympy.lambdify([t, u], self.X.to_matrix(C))
         lin_t = np.linspace(0., 1., 10)
         lin_u = np.linspace(0., 1., 10)
         X, Y, Z = np.zeros(0), np.zeros(0), np.zeros(0)
@@ -167,7 +206,6 @@ class Surface(Entity):
         ax.plot_trisurf(X,Y,Z)
 
 system = System()
-#plane = Entity(system, ParametricRegion((x,y,6-x-y), (x,0,1), (y, 0, 1)))
 #point = Point(system, (0,0,5), 2*10**-6) # 2 microC
 surface = Surface(system, t, u, 0)
 #surface2 = Surface(system, t, u, 10)
@@ -187,11 +225,3 @@ system.add_entity(point2)
 force = point1.force_experienced()
 print("Vector force", force)
 print("Force =", np.sqrt(force.dot(force)))
-
-#print(system.calculate_total_field_at_point(0,0,5))
-
-#E = point.field_at_point(1,2,5)
-#E = plane.field_at_point(1,2,4)
-#print(E)
-#print(E.simplify().doit())
-#print(N(E.coeff(C.i),5), N(E.coeff(C.j),5), N(E.coeff(C.k, 5)))
